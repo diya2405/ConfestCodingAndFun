@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import API from '../api/axios';
@@ -22,6 +22,7 @@ function Navbar({ user, onLogout }) {
     </nav>
   );
 }
+
 const nav = {
   bar:       { position:'sticky',top:0,zIndex:100,background:'#fff',borderBottom:'1.5px solid #E8E4DC',fontFamily:'"DM Sans","Segoe UI",sans-serif' },
   inner:     { maxWidth:1200,margin:'0 auto',display:'flex',alignItems:'center',padding:'0 32px',height:64,gap:40 },
@@ -40,7 +41,11 @@ const emptyProblem = () => ({
   title: '', description: '', difficulty: 'Medium', points: 100,
   examples: [{ input: '', output: '', explanation: '' }],
   constraints: [''],
-  test_cases: [{ input: '', output: '' }],
+  input_type: 'stdin',
+  test_cases: [
+    { input: '', output: '' },
+    { input: '', output: '' }
+  ],
 });
 
 export default function CreateContest() {
@@ -57,16 +62,19 @@ export default function CreateContest() {
     start_time: '', duration_mins: 90, max_participants: 100,
     tags: [],
   });
+  
+  const [startDate, setStartDate] = useState('');
+  const [startHour, setStartHour] = useState('8');
+  const [startMinute, setStartMinute] = useState('00');
+  const [startAMPM, setStartAMPM] = useState('AM');
   const [problems, setProblems] = useState([emptyProblem()]);
 
   const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
-
   const toggleTag = t => setForm(p => ({
     ...p,
     tags: p.tags.includes(t) ? p.tags.filter(x => x !== t) : [...p.tags, t]
   }));
 
-  // Problem helpers
   const setProb = (i, k, v) => setProblems(ps => ps.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
   const addProblem = () => setProblems(ps => [...ps, emptyProblem()]);
   const removeProblem = i => setProblems(ps => ps.filter((_, idx) => idx !== i));
@@ -94,14 +102,14 @@ export default function CreateContest() {
 
   const validate = () => {
     if (step === 1) {
-      if (!form.title.trim())       return setError('Contest title is required'), false;
-      if (!form.start_time)         return setError('Start time is required'), false;
-      if (form.duration_mins < 10)  return setError('Duration must be at least 10 minutes'), false;
+      if (!form.title.trim()) return setError('Contest title is required'), false;
+      if (!form.start_time) return setError('Start time is required'), false;
+      if (form.duration_mins < 10) return setError('Duration must be at least 10 minutes'), false;
       if (new Date(form.start_time) < new Date()) return setError('Start time must be in the future'), false;
     }
     if (step === 2) {
       for (let i = 0; i < problems.length; i++) {
-        if (!problems[i].title.trim())       return setError(`Problem ${i + 1}: title required`), false;
+        if (!problems[i].title.trim()) return setError(`Problem ${i + 1}: title required`), false;
         if (!problems[i].description.trim()) return setError(`Problem ${i + 1}: description required`), false;
       }
     }
@@ -109,18 +117,42 @@ export default function CreateContest() {
     return true;
   };
 
+  const submittingRef = useRef(false);
+
   const handleSubmit = async () => {
     if (!validate()) return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setLoading(true);
     try {
-      const payload = { ...form, problems };
+      const normalizedProblems = problems.map(p => {
+        const tcs = (p.test_cases || []).filter(tc => tc.input.trim() && tc.output.trim()).map(tc => {
+          const rawIn = tc.input.trim();
+          const rawOut = tc.output.trim();
+          let parsedOut = rawOut;
+          try { parsedOut = JSON.parse(rawOut); } catch {}
+          if ((p.input_type || 'stdin') === 'function') {
+            let parsedIn;
+            try { const arr = JSON.parse(rawIn); parsedIn = Array.isArray(arr) ? arr : [arr]; }
+            catch { parsedIn = [rawIn]; }
+            return { input: parsedIn, output: parsedOut };
+          }
+          return { input: rawIn, output: parsedOut };
+        });
+        return { ...p, input_type: p.input_type || 'stdin', test_cases: tcs };
+      });
+
+      const payload = { ...form, problems: normalizedProblems };
+      if (payload.start_time) payload.start_time = new Date(payload.start_time).toISOString();
       const res = await API.post('/contests/create', payload);
+      const contestId = res.data.contest_id;
       setSuccess('Contest created successfully!');
-      setTimeout(() => navigate(`/contests`), 1500);
+      setTimeout(() => navigate(`/contest-dashboard/${contestId}`), 1500);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to create contest');
     } finally {
       setLoading(false);
+      submittingRef.current = false;
     }
   };
 
@@ -139,17 +171,15 @@ export default function CreateContest() {
       <Navbar user={user} onLogout={() => { logout(); navigate('/login'); }} />
 
       <main style={{ maxWidth:860, margin:'0 auto', padding:'40px 24px 80px' }}>
-        {/* Header */}
         <div style={{ marginBottom:32 }}>
           <Link to="/contests" style={{ fontSize:13, color:'#D4521A', fontWeight:600, textDecoration:'none' }}>← Back to Contests</Link>
           <h1 style={{ fontSize:28, fontWeight:900, color:'#1A1A1A', margin:'10px 0 4px', fontFamily:'Georgia,serif' }}>Create a Contest</h1>
           <p style={{ color:'#888', fontSize:14, margin:0 }}>Set up a timed coding contest for your peers</p>
         </div>
 
-        {/* Step Indicator */}
         <div style={{ display:'flex', alignItems:'center', marginBottom:36 }}>
           {STEPS.map((s, i) => {
-            const done   = step > i + 1;
+            const done = step > i + 1;
             const active = step === i + 1;
             return (
               <div key={s} style={{ display:'flex', alignItems:'center', flex: i < STEPS.length - 1 ? 1 : 0 }}>
@@ -170,10 +200,9 @@ export default function CreateContest() {
           })}
         </div>
 
-        {error   && <div style={{ background:'#FEE2E2', color:'#991B1B', border:'1px solid #FECACA', borderRadius:10, padding:'12px 16px', marginBottom:20, fontSize:14 }}>{error}</div>}
+        {error && <div style={{ background:'#FEE2E2', color:'#991B1B', border:'1px solid #FECACA', borderRadius:10, padding:'12px 16px', marginBottom:20, fontSize:14 }}>{error}</div>}
         {success && <div style={{ background:'#DCFCE7', color:'#166534', border:'1px solid #BBF7D0', borderRadius:10, padding:'12px 16px', marginBottom:20, fontSize:14 }}>{success}</div>}
 
-        {/* ── STEP 1: Contest Details ── */}
         {step === 1 && (
           <div style={{ background:'#fff', borderRadius:16, border:'1.5px solid #E8E4DC', padding:'32px' }}>
             <h2 style={{ fontSize:18, fontWeight:800, color:'#1A1A1A', margin:'0 0 24px', fontFamily:'Georgia,serif' }}>Contest Details</h2>
@@ -191,7 +220,47 @@ export default function CreateContest() {
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:20, marginBottom:18 }}>
               <div style={field}>
                 <label style={lbl}>Start Date & Time *</label>
-                <input style={inp} type="datetime-local" value={form.start_time} onChange={e => setF('start_time', e.target.value)} />
+                <div style={{ display:'flex', gap:8 }}>
+                  <input style={{ ...inp, flex:1 }} type="date" value={startDate} onChange={e => {
+                    const d = e.target.value; setStartDate(d);
+                    if (d) {
+                      const h = parseInt(startHour, 10);
+                      const hh = startAMPM === 'PM' ? (h % 12) + 12 : (h % 12);
+                      setF('start_time', `${d}T${String(hh).padStart(2,'0')}:${startMinute}`);
+                    } else setF('start_time', '');
+                  }} />
+                  <select style={{ ...inp, width:80 }} value={startHour} onChange={e => {
+                    const v = e.target.value; setStartHour(v);
+                    if (startDate) {
+                      const h = parseInt(v, 10);
+                      const hh = startAMPM === 'PM' ? (h % 12) + 12 : (h % 12);
+                      setF('start_time', `${startDate}T${String(hh).padStart(2,'0')}:${startMinute}`);
+                    }
+                  }}>
+                    {Array.from({length:12}, (_,i)=>String(i+1)).map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                  <select style={{ ...inp, width:80 }} value={startMinute} onChange={e => {
+                    const v = e.target.value; setStartMinute(v);
+                    if (startDate) {
+                      const h = parseInt(startHour, 10);
+                      const hh = startAMPM === 'PM' ? (h % 12) + 12 : (h % 12);
+                      setF('start_time', `${startDate}T${String(hh).padStart(2,'0')}:${v}`);
+                    }
+                  }}>
+                    {Array.from({length:60}, (_,i)=>String(i).padStart(2,'0')).map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                  <select style={{ ...inp, width:90 }} value={startAMPM} onChange={e => {
+                    const v = e.target.value; setStartAMPM(v);
+                    if (startDate) {
+                      const h = parseInt(startHour, 10);
+                      const hh = v === 'PM' ? (h % 12) + 12 : (h % 12);
+                      setF('start_time', `${startDate}T${String(hh).padStart(2,'0')}:${startMinute}`);
+                    }
+                  }}>
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                  </select>
+                </div>
               </div>
               <div style={field}>
                 <label style={lbl}>Duration (minutes) *</label>
@@ -208,8 +277,8 @@ export default function CreateContest() {
                       flex:1, padding:'10px', borderRadius:8, fontSize:14, fontWeight:700, cursor:'pointer',
                       border:'1.5px solid', fontFamily:'inherit',
                       borderColor: form.difficulty === d ? '#D4521A' : '#E8E4DC',
-                      background:  form.difficulty === d ? '#FEF1EB' : '#fff',
-                      color:       form.difficulty === d ? '#D4521A' : '#888',
+                      background: form.difficulty === d ? '#FEF1EB' : '#fff',
+                      color: form.difficulty === d ? '#D4521A' : '#888',
                     }}>{d}</button>
                   ))}
                 </div>
@@ -228,8 +297,8 @@ export default function CreateContest() {
                     padding:'7px 16px', borderRadius:20, fontSize:13, fontWeight:600, cursor:'pointer',
                     border:'1.5px solid', fontFamily:'inherit',
                     borderColor: form.tags.includes(t) ? '#D4521A' : '#E8E4DC',
-                    background:  form.tags.includes(t) ? '#FEF1EB' : '#fff',
-                    color:       form.tags.includes(t) ? '#D4521A' : '#888',
+                    background: form.tags.includes(t) ? '#FEF1EB' : '#fff',
+                    color: form.tags.includes(t) ? '#D4521A' : '#888',
                   }}>{form.tags.includes(t) ? '✓ ' : ''}{t}</button>
                 ))}
               </div>
@@ -237,7 +306,6 @@ export default function CreateContest() {
           </div>
         )}
 
-        {/* ── STEP 2: Problems ── */}
         {step === 2 && (
           <div>
             {problems.map((prob, pi) => (
@@ -268,8 +336,8 @@ export default function CreateContest() {
                           flex:1, padding:'9px 6px', borderRadius:8, fontSize:13, fontWeight:700, cursor:'pointer',
                           border:'1.5px solid', fontFamily:'inherit',
                           borderColor: prob.difficulty === d ? '#D4521A' : '#E8E4DC',
-                          background:  prob.difficulty === d ? '#FEF1EB' : '#fff',
-                          color:       prob.difficulty === d ? '#D4521A' : '#888',
+                          background: prob.difficulty === d ? '#FEF1EB' : '#fff',
+                          color: prob.difficulty === d ? '#D4521A' : '#888',
                         }}>{d}</button>
                       ))}
                     </div>
@@ -280,8 +348,8 @@ export default function CreateContest() {
                   </div>
                 </div>
 
-                {/* Examples */}
-                <div style={{ marginBottom:18 }}>
+                {/* Examples Section */}
+                <div style={{ marginBottom:24 }}>
                   <label style={lbl}>Examples</label>
                   {prob.examples.map((ex, ei) => (
                     <div key={ei} style={{ background:'#FAF8F4', borderRadius:10, border:'1px solid #E8E4DC', padding:'14px', marginBottom:10 }}>
@@ -302,40 +370,204 @@ export default function CreateContest() {
                     </div>
                   ))}
                   <button onClick={() => setProblems(ps => ps.map((p, idx) => idx === pi ? { ...p, examples: [...p.examples, { input:'', output:'', explanation:'' }] } : p))}
-                    style={{ fontSize:13, color:'#D4521A', fontWeight:600, background:'none', border:'none', cursor:'pointer', padding:0 }}>
+                    style={{ fontSize:13, color:'#D4521A', fontWeight:600, background:'none', border:'none', cursor:'pointer', padding:0, marginTop:8 }}>
                     + Add Example
                   </button>
                 </div>
 
-                {/* Test Cases */}
-                <div style={{ marginBottom:18 }}>
-                  <label style={lbl}>Test Cases (used for auto-grading)</label>
+                {/* INPUT TYPE SELECTOR */}
+                <div style={{ marginBottom:24, marginTop:16, padding:16, background:'#F5F5F5', borderRadius:12 }}>
+                  <label style={lbl}>Input Style *</label>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:6 }}>
+                    <button onClick={() => setProb(pi, 'input_type', 'stdin')} style={{
+                      padding: '12px',
+                      borderRadius: 8,
+                      border: prob.input_type === 'stdin' ? '2px solid #D4521A' : '1px solid #ccc',
+                      background: prob.input_type === 'stdin' ? '#FEF1EB' : '#fff',
+                      cursor: 'pointer',
+                      fontWeight: prob.input_type === 'stdin' ? 700 : 400
+                    }}>
+                      📥 Stdin / input()
+                    </button>
+                    <button onClick={() => setProb(pi, 'input_type', 'function')} style={{
+                      padding: '12px',
+                      borderRadius: 8,
+                      border: prob.input_type === 'function' ? '2px solid #D4521A' : '1px solid #ccc',
+                      background: prob.input_type === 'function' ? '#FEF1EB' : '#fff',
+                      cursor: 'pointer',
+                      fontWeight: prob.input_type === 'function' ? 700 : 400
+                    }}>
+                      ⚙️ Function Args (JSON)
+                    </button>
+                  </div>
+                </div>
+
+                {/* TEST CASES SECTION - NOW DEFINITELY VISIBLE */}
+                <div style={{ 
+                  marginTop: 24,
+                  marginBottom: 24,
+                  padding: 20,
+                  background: '#FFF9F0',
+                  borderRadius: 12,
+                  border: '3px solid #D4521A',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                }}>
+                  <div style={{ 
+                    fontSize: 18, 
+                    fontWeight: 800, 
+                    color: '#D4521A', 
+                    marginBottom: 16,
+                    borderBottom: '2px solid #D4521A',
+                    paddingBottom: 8
+                  }}>
+                    🧪 TEST CASES (Required for Auto-Grading)
+                  </div>
+                  
+                  <div style={{ 
+                    background: '#E8F4FD', 
+                    padding: 12, 
+                    borderRadius: 8, 
+                    marginBottom: 20,
+                    fontSize: 13,
+                    color: '#004085'
+                  }}>
+                    💡 Each test case will be used to automatically grade submissions. 
+                    Points will be distributed equally among all test cases.
+                  </div>
+
                   {prob.test_cases.map((tc, ti) => (
-                    <div key={ti} style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:8 }}>
-                      <div>
-                        <label style={{ ...lbl, fontSize:11 }}>Input</label>
-                        <input style={{ ...inp, fontSize:13 }} placeholder='[2,7,11], 9' value={tc.input} onChange={e => setTestCase(pi, ti, 'input', e.target.value)} />
+                    <div key={ti} style={{ 
+                      background: '#FFFFFF', 
+                      border: '2px solid #E8E4DC', 
+                      borderRadius: 12, 
+                      padding: 16, 
+                      marginBottom: 16 
+                    }}>
+                      <div style={{ 
+                        display: 'flex', 
+                        justifyContent: 'space-between', 
+                        alignItems: 'center', 
+                        marginBottom: 12,
+                        paddingBottom: 8,
+                        borderBottom: '1px solid #E8E4DC'
+                      }}>
+                        <span style={{ fontSize: 15, fontWeight: 800, color: '#D4521A' }}>
+                          Test Case #{ti + 1}
+                        </span>
+                        {prob.test_cases.length > 1 && (
+                          <button 
+                            onClick={() => {
+                              const newTestCases = prob.test_cases.filter((_, idx) => idx !== ti);
+                              setProb(pi, 'test_cases', newTestCases);
+                            }}
+                            style={{ 
+                              background: '#FEE2E2', 
+                              color: '#991B1B', 
+                              border: 'none', 
+                              borderRadius: 6, 
+                              padding: '4px 12px', 
+                              fontSize: 12, 
+                              fontWeight: 600, 
+                              cursor: 'pointer' 
+                            }}>
+                            ✕ Remove
+                          </button>
+                        )}
                       </div>
-                      <div>
-                        <label style={{ ...lbl, fontSize:11 }}>Expected Output</label>
-                        <input style={{ ...inp, fontSize:13 }} placeholder='[0,1]' value={tc.output} onChange={e => setTestCase(pi, ti, 'output', e.target.value)} />
+                      
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div>
+                          <label style={{ ...lbl, fontSize: 12, marginBottom: 4 }}>
+                            {prob.input_type === 'stdin' ? '📥 Input (stdin)' : '⚙️ Input (JSON args)'}
+                          </label>
+                          <textarea 
+                            rows={4}
+                            style={{ 
+                              ...inp, 
+                              fontSize: 13, 
+                              resize: 'vertical', 
+                              fontFamily: 'monospace',
+                              background: '#FAFAFA'
+                            }}
+                            placeholder={prob.input_type === 'stdin'
+                              ? 'Example:\n2 3\n\n(what input() reads)'
+                              : 'Example:\n[[2,7,11], 9]\n\n(JSON array of fn args)'}
+                            value={tc.input}
+                            onChange={e => setTestCase(pi, ti, 'input', e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ ...lbl, fontSize: 12, marginBottom: 4 }}>Expected Output</label>
+                          <textarea 
+                            rows={4}
+                            style={{ 
+                              ...inp, 
+                              fontSize: 13, 
+                              resize: 'vertical', 
+                              fontFamily: 'monospace',
+                              background: '#FAFAFA'
+                            }}
+                            placeholder={prob.input_type === 'stdin'
+                              ? 'Example:\n5\n\n(exact stdout)'
+                              : 'Example:\n[0, 1]\n\n(return value)'}
+                            value={tc.output}
+                            onChange={e => setTestCase(pi, ti, 'output', e.target.value)}
+                          />
+                        </div>
                       </div>
+                      
+                      {(tc.input.trim() && tc.output.trim()) && (
+                        <div style={{ 
+                          marginTop: 8, 
+                          fontSize: 12, 
+                          color: '#16a34a',
+                          fontWeight: 600
+                        }}>
+                          ✓ Test case completed
+                        </div>
+                      )}
                     </div>
                   ))}
-                  <button onClick={() => setProblems(ps => ps.map((p, idx) => idx === pi ? { ...p, test_cases: [...p.test_cases, { input:'', output:'' }] } : p))}
-                    style={{ fontSize:13, color:'#D4521A', fontWeight:600, background:'none', border:'none', cursor:'pointer', padding:0 }}>
+                  
+                  <button 
+                    onClick={() => setProb(pi, 'test_cases', [...prob.test_cases, { input: '', output: '' }])}
+                    style={{ 
+                      width: '100%',
+                      padding: '12px 16px',
+                      marginTop: 8,
+                      fontSize: 14,
+                      color: '#D4521A',
+                      fontWeight: 700,
+                      background: '#FFFFFF',
+                      border: '2px dashed #D4521A',
+                      borderRadius: 10,
+                      cursor: 'pointer',
+                      transition: 'all 0.3s'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.background = '#FEF1EB';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.background = '#FFFFFF';
+                    }}>
                     + Add Test Case
                   </button>
                 </div>
 
-                {/* Constraints */}
-                <div>
+                {/* Constraints Section */}
+                <div style={{ marginTop: 24 }}>
                   <label style={lbl}>Constraints</label>
                   {prob.constraints.map((c, ci) => (
-                    <input key={ci} style={{ ...inp, marginBottom:8, fontSize:13 }} placeholder="e.g. 1 ≤ n ≤ 10^5" value={c} onChange={e => setConstraint(pi, ci, e.target.value)} />
+                    <input 
+                      key={ci} 
+                      style={{ ...inp, marginBottom: 8, fontSize: 13 }} 
+                      placeholder="e.g. 1 ≤ n ≤ 10^5" 
+                      value={c} 
+                      onChange={e => setConstraint(pi, ci, e.target.value)} 
+                    />
                   ))}
                   <button onClick={() => setProblems(ps => ps.map((p, idx) => idx === pi ? { ...p, constraints: [...p.constraints, ''] } : p))}
-                    style={{ fontSize:13, color:'#D4521A', fontWeight:600, background:'none', border:'none', cursor:'pointer', padding:0 }}>
+                    style={{ fontSize:13, color:'#D4521A', fontWeight:600, background:'none', border:'none', cursor:'pointer', padding:0, marginTop:4 }}>
                     + Add Constraint
                   </button>
                 </div>
@@ -343,15 +575,22 @@ export default function CreateContest() {
             ))}
 
             <button onClick={addProblem} style={{
-              width:'100%', padding:'14px', borderRadius:10, border:'2px dashed #D4521A',
-              background:'#FEF1EB', color:'#D4521A', fontSize:15, fontWeight:700, cursor:'pointer',
+              width:'100%', 
+              padding:'14px', 
+              borderRadius:10, 
+              border:'2px dashed #D4521A',
+              background:'#FEF1EB', 
+              color:'#D4521A', 
+              fontSize:15, 
+              fontWeight:700, 
+              cursor:'pointer',
+              marginTop: 20
             }}>
               + Add Another Problem
             </button>
           </div>
         )}
 
-        {/* ── STEP 3: Review ── */}
         {step === 3 && (
           <div style={{ background:'#fff', borderRadius:16, border:'1.5px solid #E8E4DC', padding:'32px' }}>
             <h2 style={{ fontSize:18, fontWeight:800, color:'#1A1A1A', margin:'0 0 24px', fontFamily:'Georgia,serif' }}>Review & Publish</h2>
@@ -363,7 +602,7 @@ export default function CreateContest() {
                   ['Difficulty', form.difficulty],
                   ['Duration', `${form.duration_mins} min`],
                   ['Max Participants', form.max_participants],
-                  ['Start Time', form.start_time ? new Date(form.start_time).toLocaleString('en-IN') : 'Not set'],
+                  ['Start Time', form.start_time ? new Date(form.start_time).toLocaleString() : 'Not set'],
                   ['Problems', problems.length],
                   ['Tags', form.tags.join(', ') || 'None'],
                 ].map(([k, v]) => (
@@ -395,7 +634,6 @@ export default function CreateContest() {
           </div>
         )}
 
-        {/* Navigation */}
         <div style={{ display:'flex', gap:12, marginTop:28 }}>
           {step > 1 && (
             <button onClick={() => { setError(''); setStep(s => s-1); }} style={{ padding:'13px 24px', borderRadius:10, border:'1.5px solid #E8E4DC', background:'transparent', fontSize:15, fontWeight:700, color:'#666', cursor:'pointer', fontFamily:'inherit' }}>
