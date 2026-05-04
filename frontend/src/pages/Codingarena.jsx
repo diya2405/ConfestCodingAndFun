@@ -54,21 +54,14 @@ function getPyodide() {
 // Deep equality with sorted keys — matches backend's json.dumps(sort_keys=True)
 function deepEqual(a, b) {
   try {
-    const sortedStringify = (v) => JSON.stringify(v, Object.keys(v ?? {}).sort());
-    // For arrays/objects use recursive sorted stringify
-    const sa = JSON.stringify(a, (_, v) => {
+    // Recursively sort object keys so {"b":2,"a":1} equals {"a":1,"b":2}
+    const sortedReplacer = (_, v) => {
       if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
         return Object.fromEntries(Object.entries(v).sort(([ka], [kb]) => ka.localeCompare(kb)));
       }
       return v;
-    });
-    const sb = JSON.stringify(b, (_, v) => {
-      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-        return Object.fromEntries(Object.entries(v).sort(([ka], [kb]) => ka.localeCompare(kb)));
-      }
-      return v;
-    });
-    return sa === sb;
+    };
+    return JSON.stringify(a, sortedReplacer) === JSON.stringify(b, sortedReplacer);
   } catch (_) {
     return String(a).trim() === String(b).trim();
   }

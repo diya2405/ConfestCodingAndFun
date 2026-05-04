@@ -463,13 +463,21 @@ def init_contests(app, db):
         inp = tc.get("input", "")
         out = tc.get("output", "")
 
+        def _serialize_value(v):
+            """Consistently serialize any test case value (list, dict, str, int, etc.) to a display string."""
+            if v is None:
+                return ""
+            if isinstance(v, (list, dict)):
+                return _json.dumps(v)
+            return str(v)
+
         return jsonify({
-            "message":        f"Hint revealed! Test case #{reveal_idx + 1} is now visible.",
-            "tokens_left":    tokens_left - 1,
-            "tc_index":       reveal_idx,
-            "tc_total":       len(test_cases),
-            "input":          _json.dumps(inp) if isinstance(inp, list) else str(inp),
-            "expected_output": _json.dumps(out) if not isinstance(out, str) else out,
+            "message":         f"Hint revealed! Test case #{reveal_idx + 1} is now visible.",
+            "tokens_left":     tokens_left - 1,
+            "tc_index":        reveal_idx,
+            "tc_total":        len(test_cases),
+            "input":           _serialize_value(inp),
+            "expected_output": _serialize_value(out),
         }), 200
 
     # ── Contests created BY a user ─────────────────────────────────────────
