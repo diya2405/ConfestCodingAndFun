@@ -51,6 +51,22 @@ function getPyodide() {
   });
 }
  
+// Deep equality with sorted keys — matches backend's json.dumps(sort_keys=True)
+function deepEqual(a, b) {
+  try {
+    // Recursively sort object keys so {"b":2,"a":1} equals {"a":1,"b":2}
+    const sortedReplacer = (_, v) => {
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        return Object.fromEntries(Object.entries(v).sort(([ka], [kb]) => ka.localeCompare(kb)));
+      }
+      return v;
+    };
+    return JSON.stringify(a, sortedReplacer) === JSON.stringify(b, sortedReplacer);
+  } catch (_) {
+    return String(a).trim() === String(b).trim();
+  }
+}
+
 // FIX: uses globals() to find functions — locals() does NOT work after exec()
 async function runPythonCode(code, testCases) {
   let py;
@@ -116,16 +132,14 @@ _run_test_res
           const gotVal = normalize(gotStr);
           const expVal = normalize(tcToUse.output);
           const isRegex = typeof expVal === 'string' && expVal.startsWith('re:');
-          // First try trimmed-string equality to handle numeric/string/newline differences
           const asStr = s => String(s == null ? '' : s).replace(/\r\n/g,'\n').trim();
           let match = false;
           if (isRegex) {
             try { match = new RegExp(expVal.slice(3)).test(asStr(gotVal)); } catch(e) { match = false; }
           } else {
-            // if both are objects/arrays, prefer deep equality
+            // Issue 1 fix: use deepEqual (sort-key aware) for objects/arrays
             if ((typeof gotVal === 'object' && gotVal !== null) || (typeof expVal === 'object' && expVal !== null)) {
-              try { match = JSON.stringify(gotVal) === JSON.stringify(expVal); } catch(e) { match = false; }
-              // fallback to string compare
+              match = deepEqual(gotVal, expVal);
               if (!match) match = asStr(gotVal) === asStr(expVal);
             } else {
               match = asStr(gotVal) === asStr(expVal);
@@ -186,8 +200,9 @@ _run_test2_res
         if (typeof expN === 'string' && expN.startsWith('re:')) {
           try { match = new RegExp(expN.slice(3)).test(asStr2(gotN)); } catch(e) { match = false; }
         } else {
+          // Issue 1 fix: use deepEqual (sort-key aware) for objects/arrays
           if ((typeof gotN === 'object' && gotN !== null) || (typeof expN === 'object' && expN !== null)) {
-            try { match = JSON.stringify(gotN) === JSON.stringify(expN); } catch(e) { match = false; }
+            match = deepEqual(gotN, expN);
             if (!match) match = asStr2(gotN) === asStr2(expN);
           } else {
             match = asStr2(gotN) === asStr2(expN);
@@ -439,8 +454,11 @@ function ProblemPanel({ problem, submissions }) {
               )}
 
               <div style={{ display:'flex',gap:16,paddingTop:10,borderTop:'1px solid #F0EDE6' }}>
-                <span style={{ fontSize:11,color:'#AAA' }}>⏱ {problem.time_limit_ms||1000}ms</span>
+                <span style={{ fontSize:11,color:'#AAA' }}>⏱ {problem.time_limit_ms||1000}ms exec</span>
                 <span style={{ fontSize:11,color:'#AAA' }}>💾 {problem.memory_limit_mb||256}MB</span>
+                {problem.time_limit_mins > 0 && (
+                  <span style={{ fontSize:11,color:'#f59e0b',fontWeight:700 }}>⏰ Must solve within {problem.time_limit_mins} min of contest start</span>
+                )}
               </div>
             </>
           );
@@ -455,13 +473,18 @@ function ProblemPanel({ problem, submissions }) {
                 {mySubmissions.map((s,i) => (
                   <div key={i} style={{ border:'1.5px solid #E8E4DC',borderRadius:10,padding:'12px 14px' }}>
                     <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4 }}>
-                      <span style={{ fontSize:13,fontWeight:800,color:VERD_C[s.verdict]||'#888' }}>{s.verdict}</span>
+                      <div style={{ display:'flex',alignItems:'center',gap:6 }}>
+                        <span style={{ fontSize:13,fontWeight:800,color:VERD_C[s.verdict]||'#888' }}>{s.verdict}</span>
+                        {(s.is_late || s.isLate) && (
+                          <span style={{ fontSize:10,fontWeight:700,padding:'2px 6px',borderRadius:4,background:'#1f2937',color:'#6b7280' }}>PRACTICE</span>
+                        )}
+                      </div>
                       <span style={{ fontSize:11,color:'#AAA' }}>{new Date(s.submittedAt||s.submitted_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</span>
                     </div>
                     <div style={{ display:'flex',gap:12,flexWrap:'wrap' }}>
                       <span style={{ fontSize:12,color:'#888' }}>{(s.language||'').toUpperCase()}</span>
                       <span style={{ fontSize:12,color:'#888' }}>{s.passed??s.test_cases_passed??0}/{s.total??s.test_cases_total??0} tests</span>
-                      {s.score>0 && <span style={{ fontSize:12,color:'#D4521A',fontWeight:700 }}>+{s.score} pts</span>}
+                      {s.score>0 && !(s.is_late||s.isLate) && <span style={{ fontSize:12,color:'#D4521A',fontWeight:700 }}>+{s.score} pts</span>}
                     </div>
                   </div>
                 ))}
@@ -633,13 +656,18 @@ function VerdictPanel({ result, onClose }) {
             {result.passed!=null && !isLoad && (
               <span style={{ fontSize:13,color:'#888' }}>{result.passed}/{result.total} test cases passed</span>
             )}
-            {result.score>0 && !result.runOnly && (
+            {result.score>0 && !result.runOnly && !result.isLate && (
               <span style={{ fontSize:13,fontWeight:700,color:'#D4521A',background:'#FEF1EB',padding:'2px 10px',borderRadius:20 }}>
                 +{result.score} pts
               </span>
             )}
+            {result.isLate && (
+              <span style={{ fontSize:12,fontWeight:700,color:'#9ca3af',background:'#1f2937',padding:'2px 10px',borderRadius:20 }}>
+                Practice — score not counted
+              </span>
+            )}
           </div>
- 
+
           {result.verdict==='Loading' && <div style={{ fontSize:13,color:'#888' }}>Running against test cases...</div>}
           {result.verdict==='Note'    && result.message && <div style={{ fontSize:13,color:'#3b82f6' }}>{result.message}</div>}
           {result.timeMs>0 && !isLoad && <div style={{ fontSize:12,color:'#AAA' }}>Execution: {result.timeMs}ms</div>}
@@ -750,12 +778,17 @@ export default function CodingArena() {
   const [lbTick,     setLbTick]     = useState(0);
   const [submissions, setSubmissions] = useState([]);
   const [tick,        setTick]        = useState(0); // seconds tick for countdown/status re-check
- 
+
+  // Issue 5: Hint Token state
+  const [hintTokens, setHintTokens] = useState(3);
+  const [hintModal,  setHintModal]  = useState(null); // { input, expected_output, tc_index, tc_total, message }
+  const [hintLoading, setHintLoading] = useState(false);
+
   // FIX: get userId consistently — API returns 'id', local store uses '_id'
   const userId      = authUser?.id || authUser?._id || '';
   const username    = authUser?.username || '';
   const institution = authUser?.institution || '';
- 
+
   // ── Load contest + problems (runs once on mount) ──────────────────────────
   useEffect(() => {
     if (!contestId) return;
@@ -768,6 +801,8 @@ export default function CodingArena() {
         // API returned data successfully — user is registered
         setContest(c);
         setProblems(c.problems || []);
+        // Issue 5: load hint tokens from contest data
+        if (typeof c.hint_tokens === 'number') setHintTokens(c.hint_tokens);
       } catch(err) {
         const status = err.response?.status;
         if (status === 403) {
@@ -902,7 +937,7 @@ export default function CodingArena() {
     if (!prob) return;
     setSubmitting(true);
     setVerdict({ verdict:'Loading', score:0 });
- 
+
     try {
       // Try backend first — it does real evaluation
       const res = await API.post('/submissions/submit', {
@@ -919,7 +954,11 @@ export default function CodingArena() {
         verdict: d.verdict, score: d.score,
         passed: d.passed, total: d.total, timeMs: d.execution_time_ms,
       });
-      setVerdict({ verdict:d.verdict, score:d.score, passed:d.passed, total:d.total, timeMs:d.execution_time_ms, details:d.test_results||[] });
+      setVerdict({
+        verdict: d.verdict, score: d.score, passed: d.passed, total: d.total,
+        timeMs: d.execution_time_ms, details: d.test_results || [],
+        isLate: d.is_late || false,
+      });
     } catch {
       // Fallback: local Pyodide for Python
       if (lang === 'python') {
@@ -948,11 +987,36 @@ export default function CodingArena() {
         return;
       }
     }
- 
+
     refreshSubs();
     setSubmitting(false);
   };
- 
+
+  // ── HINT TOKEN (Issue 5) ───────────────────────────────────────────────────
+  const handleHint = async () => {
+    const prob = problems[probIdx];
+    if (!prob) return;
+    if (hintTokens <= 0) return;
+    setHintLoading(true);
+    try {
+      const res = await API.post(`/contests/${contestId}/hint`, { problem_id: prob._id });
+      const d = res.data;
+      setHintTokens(d.tokens_left);
+      setHintModal({
+        message:         d.message,
+        input:           d.input,
+        expected_output: d.expected_output,
+        tc_index:        d.tc_index,
+        tc_total:        d.tc_total,
+        tokens_left:     d.tokens_left,
+      });
+    } catch(err) {
+      const msg = err.response?.data?.error || 'Failed to use hint. Try again.';
+      setHintModal({ error: msg });
+    }
+    setHintLoading(false);
+  };
+
   const handleLogout = () => { authLogout(); navigate('/login'); };
  
   // ── Guards ─────────────────────────────────────────────────────────────────
@@ -1005,10 +1069,53 @@ export default function CodingArena() {
   return (
     <div style={{ height:'100vh',display:'flex',flexDirection:'column',background:'#0D1117',fontFamily:'"DM Sans","Segoe UI",sans-serif',overflow:'hidden' }}>
       <ArenaNav contest={contest} problems={problems} probIdx={probIdx} onSwitch={i=>{setProbIdx(i);setVerdict(null)}} username={username} onExit={handleLogout} />
- 
+
       {status==='live'      && <ContestTimer contest={contest} />}
-      {status==='completed' && <div style={{ background:'#374151',padding:'8px 20px',fontSize:13,color:'#D1D5DB',fontWeight:600,textAlign:'center' }}>Contest ended — you can still practice.</div>}
- 
+      {/* Issue 4: Completed banner — allow practice submissions, but scores don't count */}
+      {status==='completed' && (
+        <div style={{ background:'#1f2937',padding:'8px 20px',fontSize:13,color:'#D1D5DB',fontWeight:600,textAlign:'center',display:'flex',alignItems:'center',justifyContent:'center',gap:12 }}>
+          <span>🏁 Contest ended</span>
+          <span style={{ color:'#9ca3af',fontWeight:400 }}>— Practice mode: submissions run but don't count to the leaderboard</span>
+        </div>
+      )}
+
+      {/* Issue 5: Hint Modal */}
+      {hintModal && (
+        <div style={{ position:'fixed',inset:0,zIndex:200,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center' }}>
+          <div style={{ background:'#1C2333',border:'1px solid #2A2A3E',borderRadius:16,padding:'28px 32px',maxWidth:480,width:'90%',fontFamily:'inherit' }}>
+            {hintModal.error ? (
+              <>
+                <div style={{ fontSize:16,fontWeight:800,color:'#ef4444',marginBottom:12 }}>❌ Hint Unavailable</div>
+                <div style={{ fontSize:14,color:'#9ca3af',marginBottom:20 }}>{hintModal.error}</div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize:16,fontWeight:800,color:'#f59e0b',marginBottom:4 }}>💡 Hint Revealed</div>
+                <div style={{ fontSize:13,color:'#9ca3af',marginBottom:16 }}>
+                  {hintModal.message} · {hintModal.tokens_left} hint{hintModal.tokens_left !== 1 ? 's' : ''} remaining
+                </div>
+                <div style={{ background:'#0D1117',borderRadius:10,padding:'14px 16px',marginBottom:8 }}>
+                  <div style={{ fontSize:12,color:'#6b7280',marginBottom:6,fontWeight:600 }}>
+                    Test Case #{(hintModal.tc_index||0)+1} of {hintModal.tc_total}
+                  </div>
+                  <div style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11,color:'#4b5563',fontWeight:700,marginBottom:2 }}>INPUT</div>
+                    <pre style={{ margin:0,fontSize:13,color:'#e5e7eb',fontFamily:'monospace',whiteSpace:'pre-wrap',wordBreak:'break-all' }}>{hintModal.input}</pre>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:11,color:'#4b5563',fontWeight:700,marginBottom:2 }}>EXPECTED OUTPUT</div>
+                    <pre style={{ margin:0,fontSize:13,color:'#34d399',fontFamily:'monospace',whiteSpace:'pre-wrap',wordBreak:'break-all' }}>{hintModal.expected_output}</pre>
+                  </div>
+                </div>
+              </>
+            )}
+            <button onClick={() => setHintModal(null)} style={{ width:'100%',padding:'10px',borderRadius:8,border:'none',background:'#D4521A',color:'#fff',fontSize:13,fontWeight:700,cursor:'pointer' }}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
       <div style={{ flex:1,display:'flex',overflow:'hidden' }}>
         {/* LEFT — problem */}
           <div id="left-panel" style={{ width:leftWidthPx, minWidth:280, maxWidth:900, borderRight:'1px solid #2A2A3E',display:'flex',flexDirection:'column',overflow:'hidden' }}>
@@ -1050,11 +1157,30 @@ export default function CodingArena() {
               <button onClick={handleRun} disabled={running||submitting} style={{ padding:'6px 14px',borderRadius:7,border:'1px solid #374151',background:'transparent',color:'#9ca3af',fontSize:12,fontWeight:700,cursor:'pointer',fontFamily:'inherit',opacity:running?0.6:1 }}>
                 {running?'⏳ Running...':'▶ Run'}
               </button>
-              <button onClick={handleSubmit} disabled={running||submitting||!problem||status==='completed'} style={{
-                padding:'6px 18px',borderRadius:7,border:'none',fontSize:12,fontWeight:800,cursor:status==='completed'?'not-allowed':'pointer',fontFamily:'inherit',opacity:submitting?0.7:1,
-                background:status==='completed'?'#374151':'#D4521A',color:status==='completed'?'#666':'#fff',
+              {/* Issue 5: Hint Token button — visible during live or completed contests */}
+              {hintTokens > 0 && status !== 'upcoming' && (
+                <button
+                  onClick={handleHint}
+                  disabled={hintLoading || running || submitting || !problem}
+                  title={`Use a hint token to reveal a hidden test case (${hintTokens} remaining)`}
+                  style={{
+                    padding:'6px 12px',borderRadius:7,border:'1px solid #f59e0b',
+                    background:'#f59e0b18',color:'#f59e0b',fontSize:12,fontWeight:700,
+                    cursor:'pointer',fontFamily:'inherit',display:'flex',alignItems:'center',gap:4,
+                    opacity:(hintLoading||!problem)?0.6:1,
+                  }}>
+                  💡 {hintLoading ? '...' : `Hint (${hintTokens})`}
+                </button>
+              )}
+              {hintTokens === 0 && status !== 'upcoming' && (
+                <span style={{ fontSize:11,color:'#4b5563',fontWeight:600 }} title="All hint tokens used">💡 No hints left</span>
+              )}
+              {/* Issue 4: Submit button enabled in completed mode (practice) */}
+              <button onClick={handleSubmit} disabled={running||submitting||!problem} style={{
+                padding:'6px 18px',borderRadius:7,border:'none',fontSize:12,fontWeight:800,cursor:'pointer',fontFamily:'inherit',opacity:submitting?0.7:1,
+                background:status==='completed'?'#2563eb':'#D4521A',color:'#fff',
               }}>
-                {submitting?'⏳ Submitting...':status==='completed'?'Ended':'Submit →'}
+                {submitting ? '⏳ Submitting...' : status==='completed' ? '🔁 Practice Submit' : 'Submit →'}
               </button>
               <button onClick={() => setTheme(t => t==='dark'?'light':'dark')} style={{ padding:'6px 10px',borderRadius:7,border:'1px solid #374151',background:'transparent',color:'#9ca3af',fontSize:12,fontWeight:700,cursor:'pointer',fontFamily:'inherit' }}>
                 {theme==='dark' ? '🌙 Dark' : '🌤 Light'}
