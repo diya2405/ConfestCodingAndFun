@@ -42,6 +42,7 @@ const emptyProblem = () => ({
   examples: [{ input: '', output: '', explanation: '' }],
   constraints: [''],
   input_type: 'stdin',
+  time_limit_mins: 0,
   test_cases: [
     { input: '', output: '' },
     { input: '', output: '' }
@@ -139,7 +140,7 @@ export default function CreateContest() {
           }
           return { input: rawIn, output: parsedOut };
         });
-        return { ...p, input_type: p.input_type || 'stdin', test_cases: tcs };
+        return { ...p, input_type: p.input_type || 'stdin', test_cases: tcs, time_limit_mins: p.time_limit_mins || 0 };
       });
 
       const payload = { ...form, problems: normalizedProblems };
@@ -346,6 +347,23 @@ export default function CreateContest() {
                     <label style={lbl}>Points</label>
                     <input style={inp} type="number" min={10} max={500} value={prob.points} onChange={e => setProb(pi, 'points', parseInt(e.target.value))} />
                   </div>
+                </div>
+
+                {/* Issue 2: Per-problem time limit within the contest */}
+                <div style={field}>
+                  <label style={lbl}>⏱ Problem Time Limit (minutes, 0 = use contest duration)</label>
+                  <input
+                    style={{ ...inp, maxWidth:220 }}
+                    type="number" min={0} max={360}
+                    value={prob.time_limit_mins}
+                    placeholder="0 (no individual limit)"
+                    onChange={e => setProb(pi, 'time_limit_mins', parseInt(e.target.value) || 0)}
+                  />
+                  {prob.time_limit_mins > 0 && (
+                    <span style={{ fontSize:12, color:'#D4521A', marginTop:4 }}>
+                      Submissions after {prob.time_limit_mins} min from contest start will be marked as late.
+                    </span>
+                  )}
                 </div>
 
                 {/* Examples Section */}

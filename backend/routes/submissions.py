@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import math, json, sys, io, time as _time
 
 submissions_bp = Blueprint('submissions', __name__)
@@ -11,12 +11,41 @@ submissions_bp = Blueprint('submissions', __name__)
 #   Style A (stdin):    n = int(input()); print(n+m)        → stdin feed
 #   Style B (function): def twoSum(nums, target): return [] → call directly
 # ─────────────────────────────────────────────────────────────────────────────
+def _normalize_expected(expected):
+    """
+    Issue 1 fix: if expected is stored as a JSON string (e.g. '[0,1]') in the DB,
+    parse it to the actual Python value so comparison works correctly.
+    """
+    if isinstance(expected, str):
+        s = expected.strip()
+        if s and s[0] in ('[', '{', '"') or s in ('true', 'false', 'null') or (s and (s[0].isdigit() or s[0] == '-')):
+            try:
+                return json.loads(s)
+            except Exception:
+                pass
+    return expected
+
+
+def _deep_equal(a, b):
+    """
+    Deep equality using JSON with sort_keys — matches the backend comparison approach.
+    Also tries normalizing string expected values.
+    """
+    b = _normalize_expected(b)
+    try:
+        return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+    except Exception:
+        return str(a).strip() == str(b).strip()
+
+
 def _run_python_testcase(compiled_code, code_str, inp, expected):
     """
     Run one test case. Returns (passed: bool, got: any, error_msg: str, time_ms: int)
     inp      — string "2\n3" (stdin style)  OR  list [2,3] (function style)
     expected — string "5" (stdin) OR any value [0,1] (function)
     """
+    # Issue 1 fix: normalize expected from string if needed before any comparison
+    expected = _normalize_expected(expected)
     ns = {}
 
     # ── If inp is a plain string → always stdin style ─────────────────────────
@@ -86,9 +115,8 @@ def _run_python_testcase(compiled_code, code_str, inp, expected):
 
         # ── Compare ───────────────────────────────────────────────────────────
         try:
-            # Deep/JSON equality first
-            passed = json.dumps(got, sort_keys=True, default=str) == \
-                     json.dumps(expected, sort_keys=True, default=str)
+            # Deep/JSON equality first (sort_keys so dict order doesn't matter)
+            passed = _deep_equal(got, expected)
         except Exception:
             passed = False
 
@@ -141,6 +169,10 @@ def init_submissions(app, db):
                 "test_cases_total":  s.get("test_cases_total", 0),
                 "execution_time_ms": s.get("execution_time_ms", 0),
                 "submitted_at":      s["submitted_at"].isoformat() if isinstance(s.get("submitted_at"), datetime) else "",
+                "code":              s.get("code", ""),
+                "is_late":           s.get("is_late", False),
+                "contest_id":        str(s["contest_id"]) if s.get("contest_id") else "",
+                "problem_id":        str(s["problem_id"]) if s.get("problem_id") else "",
             })
         return jsonify({"submissions": result}), 200
 
@@ -190,6 +222,45 @@ def init_submissions(app, db):
         if not prob:
             return jsonify({"error": "Problem not found"}), 404
 
+        # ── Issue 4 & 2: Determine if submission is late ──────────────────────
+        is_late = False
+        contest_doc = None
+        if contest_id:
+            try:
+                cid_obj = ObjectId(contest_id)
+                contest_doc = db["contests"].find_one({"_id": cid_obj})
+            except Exception:
+                pass
+
+        if contest_doc:
+            now = datetime.now(timezone.utc)
+            start = contest_doc.get("start_time")
+            if isinstance(start, str):
+                s = start
+                if s.endswith('Z'):
+                    s = s[:-1] + '+00:00'
+                try:
+                    start = datetime.fromisoformat(s)
+                except Exception:
+                    start = None
+            if isinstance(start, datetime):
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                else:
+                    start = start.astimezone(timezone.utc)
+                duration_mins = int(contest_doc.get("duration_mins", 90))
+                contest_end = start + timedelta(minutes=duration_mins)
+                if now > contest_end:
+                    is_late = True
+
+                # Issue 2: check per-problem time limit within the contest
+                if not is_late:
+                    prob_time_limit_mins = prob.get("time_limit_mins")
+                    if prob_time_limit_mins:
+                        prob_deadline = start + timedelta(minutes=int(prob_time_limit_mins))
+                        if now > prob_deadline:
+                            is_late = True
+
         test_cases   = prob.get("test_cases", [])
         total        = len(test_cases)
         passed_count = 0
@@ -208,6 +279,7 @@ def init_submissions(app, db):
                     "score": 0, "passed": 0, "total": total,
                     "execution_time_ms": 0,
                     "submission_id": "",
+                    "is_late": is_late,
                     "test_results": [{"pass": False, "input": "", "expected": "", "got": f"SyntaxError: {e}", "error": True}],
                 }), 200
 
@@ -282,6 +354,9 @@ def init_submissions(app, db):
 
         total_final = total
 
+        # ── Issue 4: Late submissions score 0 on leaderboard ─────────────────
+        leaderboard_score = 0 if is_late else score
+
         # ── Save submission ───────────────────────────────────────────────────
         sub_doc = {
             "user_id":           ObjectId(user_id),
@@ -296,11 +371,12 @@ def init_submissions(app, db):
             "test_results":      test_results[:50],
             "execution_time_ms": exec_time_ms,
             "submitted_at":      datetime.utcnow(),
+            "is_late":           is_late,
         }
         result = submissions.insert_one(sub_doc)
 
-        # ── Update user global stats (first Accepted only) ────────────────────
-        if verdict == "Accepted":
+        # ── Update user global stats (first Accepted only, not for late subs) ─
+        if verdict == "Accepted" and not is_late:
             prior = submissions.find_one({
                 "user_id":    ObjectId(user_id),
                 "problem_id": ObjectId(problem_id),
@@ -313,8 +389,8 @@ def init_submissions(app, db):
                     {"$inc": {"problems_solved": 1, "score": score}}
                 )
 
-        # ── Update contest leaderboard ────────────────────────────────────────
-        if contest_id:
+        # ── Update contest leaderboard (only if NOT late) ─────────────────────
+        if contest_id and not is_late:
             try:
                 cid = ObjectId(contest_id)
                 uid = ObjectId(user_id)
@@ -323,11 +399,12 @@ def init_submissions(app, db):
                     # Find best prior score for this problem in this contest
                     best_prior = submissions.find_one(
                         {"user_id": uid, "problem_id": ObjectId(problem_id), "contest_id": cid,
+                         "is_late": {"$ne": True},
                          "_id": {"$ne": result.inserted_id}},
                         sort=[("score", -1)]
                     )
                     prior_score = best_prior["score"] if best_prior else 0
-                    delta = max(0, score - prior_score)  # only increase, never decrease
+                    delta = max(0, leaderboard_score - prior_score)  # only increase, never decrease
 
                     update_ops = {"$set": {"last_submission": datetime.utcnow()}}
                     if delta > 0:
@@ -348,6 +425,7 @@ def init_submissions(app, db):
             "execution_time_ms": exec_time_ms,
             "submission_id":     str(result.inserted_id),
             "test_results":      test_results[:20],
+            "is_late":           is_late,
         }), 200
 
     return submissions_bp

@@ -158,6 +158,8 @@ def init_contests(app, db):
                 },
                 "time_limit_ms":    int(prob.get("time_limit_ms", 1000)),
                 "memory_limit_mb":  int(prob.get("memory_limit_mb", 256)),
+                # Issue 2: per-problem time limit in minutes (0 = no individual limit)
+                "time_limit_mins":  int(prob.get("time_limit_mins", 0)) if prob.get("time_limit_mins") else 0,
                 "created_at": datetime.utcnow(),
             }
             res = problems_col.insert_one(doc)
@@ -242,6 +244,9 @@ def init_contests(app, db):
                 "rank":            None,
                 "joined_at":       datetime.utcnow(),
                 "last_submission": None,
+                # Issue 5: Hint Tokens — each participant starts with 3
+                "hint_tokens":     3,
+                "hints_used":      [],
             })
         except Exception as e:
             return jsonify({"error": f"Failed to register: {str(e)}"}), 500
@@ -293,10 +298,18 @@ def init_contests(app, db):
             "constraints":  p.get("constraints", []),
             "test_cases":   p.get("test_cases", []),
             "starter":      p.get("starter", {}),
-            "time_limit_ms":   p.get("time_limit_ms", 1000),
-            "memory_limit_mb": p.get("memory_limit_mb", 256),
+            "time_limit_ms":    p.get("time_limit_ms", 1000),
+            "memory_limit_mb":  p.get("memory_limit_mb", 256),
+            "time_limit_mins":  p.get("time_limit_mins", 0),
         } for p in prob_docs]
         serialized["registered"] = True
+        # Issue 5: include participant's remaining hint tokens
+        if reg:
+            serialized["hint_tokens"] = reg.get("hint_tokens", 3)
+            serialized["hints_used"]  = reg.get("hints_used", [])
+        elif is_creator:
+            serialized["hint_tokens"] = 0  # creators don't participate
+            serialized["hints_used"]  = []
         return jsonify(serialized), 200
 
     # ── WAITING LOBBY — participants in a contest ──────────────────────────
@@ -364,6 +377,99 @@ def init_contests(app, db):
                 "problems_solved":  u.get("problems_solved", 0),
                 "contests_entered": u.get("contests_entered", 0),
             } for i, u in enumerate(top_users)]
+        }), 200
+
+    # ── HINT TOKEN — Issue 5 ───────────────────────────────────────────────
+    # POST /contests/<contest_id>/hint
+    # Body: { problem_id: "..." }
+    # Reveals one hidden test case for the problem. Costs 1 hint token.
+    @contests_bp.route('/<contest_id>/hint', methods=['POST'])
+    @jwt_required()
+    def use_hint(contest_id):
+        user_id = get_jwt_identity()
+        data    = request.get_json() or {}
+
+        try:
+            cid = ObjectId(contest_id)
+            uid = ObjectId(user_id)
+        except Exception:
+            return jsonify({"error": "Invalid ID"}), 400
+
+        contest = contests.find_one({"_id": cid})
+        if not contest:
+            return jsonify({"error": "Contest not found"}), 404
+
+        # Only available during live contests (and let completed ones use too for review)
+        problem_id = data.get("problem_id")
+        if not problem_id:
+            return jsonify({"error": "problem_id is required"}), 400
+
+        try:
+            pid = ObjectId(problem_id)
+        except Exception:
+            return jsonify({"error": "Invalid problem_id"}), 400
+
+        # Find participant record
+        part = participants.find_one({"contest_id": cid, "user_id": uid})
+        if not part:
+            return jsonify({"error": "You are not registered for this contest"}), 403
+
+        tokens_left = part.get("hint_tokens", 3)
+        if tokens_left <= 0:
+            return jsonify({"error": "No hint tokens remaining. You have used all 3 hints for this contest."}), 400
+
+        # Check if a hint for this problem was already used
+        hints_used = part.get("hints_used", [])
+        used_for_prob = [h for h in hints_used if h.get("problem_id") == str(pid)]
+
+        # Fetch problem test cases
+        prob = problems_col.find_one({"_id": pid})
+        if not prob:
+            return jsonify({"error": "Problem not found"}), 404
+
+        test_cases = prob.get("test_cases", [])
+        if not test_cases:
+            return jsonify({"error": "No test cases available for this problem"}), 400
+
+        # Pick the test case to reveal: cycle through hidden ones not yet revealed
+        already_revealed_indices = {h.get("tc_index") for h in used_for_prob}
+        # Find first unrevealed test case index (skip index 0 which is typically shown as example)
+        reveal_idx = None
+        for i in range(len(test_cases)):
+            if i not in already_revealed_indices:
+                reveal_idx = i
+                break
+
+        if reveal_idx is None:
+            return jsonify({"error": "All test cases for this problem have already been revealed"}), 400
+
+        tc = test_cases[reveal_idx]
+
+        # Record this hint usage
+        hint_record = {
+            "problem_id": str(pid),
+            "tc_index":   reveal_idx,
+            "used_at":    datetime.utcnow().isoformat(),
+        }
+        participants.update_one(
+            {"contest_id": cid, "user_id": uid},
+            {
+                "$inc": {"hint_tokens": -1},
+                "$push": {"hints_used": hint_record},
+            }
+        )
+
+        import json as _json
+        inp = tc.get("input", "")
+        out = tc.get("output", "")
+
+        return jsonify({
+            "message":        f"Hint revealed! Test case #{reveal_idx + 1} is now visible.",
+            "tokens_left":    tokens_left - 1,
+            "tc_index":       reveal_idx,
+            "tc_total":       len(test_cases),
+            "input":          _json.dumps(inp) if isinstance(inp, list) else str(inp),
+            "expected_output": _json.dumps(out) if not isinstance(out, str) else out,
         }), 200
 
     # ── Contests created BY a user ─────────────────────────────────────────
