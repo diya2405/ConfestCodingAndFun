@@ -7,6 +7,7 @@ import os
 from routes.profile import init_profile
 from routes.contests import init_contests
 from routes.submissions import init_submissions
+from routes.admin import init_admin
 
 
 load_dotenv()
@@ -40,6 +41,9 @@ app.register_blueprint(contests_bp, url_prefix="/api/contests")
 
 submissions_bp = init_submissions(app, db)
 app.register_blueprint(submissions_bp, url_prefix="/api/submissions")
+
+admin_bp = init_admin(app, db)
+app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
